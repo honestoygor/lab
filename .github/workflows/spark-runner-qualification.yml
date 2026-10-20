@@ -1,0 +1,60 @@
+name: Spark runner qualification
+
+on:
+  push:
+    branches: [ci/spark-runner-qualification]
+    paths: [.github/workflows/spark-runner-qualification.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: [self-hosted, Linux, ARM64, spark-isolated]
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: qualification-only
+        ports: [5432:5432]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Verify isolation and runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'QUALIFICATION_START=%s\n' "$(date -u +%s)"
+          test "$(uname -m)" = aarch64
+          test "$(nproc)" = 4
+          test ! -e /dev/nvidia0
+          test ! -e /home/honygor
+          test ! -e /home/runner/.config/gh/hosts.yml
+          docker compose version
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -c 'SELECT 1'
+          docker run --rm alpine:3.21 uname -m
+          mkdir -p "$RUNNER_TEMP/spark-build"
+          printf 'FROM alpine:3.21\nRUN test "$(uname -m)" = aarch64\n' > "$RUNNER_TEMP/spark-build/Dockerfile"
+          docker build --network=none -t spark-ci-qualification:local "$RUNNER_TEMP/spark-build"
+      - name: Exercise shared admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, time
+          from concurrent.futures import ProcessPoolExecutor
+          def work(_):
+              until = time.monotonic() + 30
+              while time.monotonic() < until:
+                  hashlib.sha256(b'spark-ci' * 1024).digest()
+          with ProcessPoolExecutor(max_workers=4) as pool:
+              list(pool.map(work, range(4)))
+          PY
+          printf 'QUALIFICATION_END=%s\n' "$(date -u +%s)"
