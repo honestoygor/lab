@@ -1,0 +1,55 @@
+name: pc1 AMD64 runner qualification
+
+on:
+  push:
+    branches: [ci/pc1-runner-qualification]
+    paths: [.github/workflows/pc1-runner-qualification.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: [self-hosted, Linux, X64, pc1-isolated]
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: qualification-only
+        ports: [5432:5432]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Verify platform, isolation, service containers and Docker builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(nproc)" = 8
+          test ! -e /home/uaedoh
+          test ! -e /home/honygor
+          test ! -e /dev/dri
+          test ! -e /home/runner/.config/gh/hosts.yml
+          test "$(systemd-detect-virt)" = kvm
+          uname -sm
+          free -h
+          docker compose version
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -c 'SELECT 1'
+          test "$(docker run --rm alpine:3.21 uname -m)" = x86_64
+          mkdir -p "$RUNNER_TEMP/pc1-build"
+          printf 'FROM alpine:3.21\nRUN test "$(uname -m)" = x86_64\n' > "$RUNNER_TEMP/pc1-build/Dockerfile"
+          docker build --network=none -t pc1-ci-qualification:local "$RUNNER_TEMP/pc1-build"
+      - name: Exercise the shared admission lease
+        run: |
+          date -u +%s
+          python3 - <<'PY'
+          import hashlib, time
+          until = time.monotonic() + 15
+          while time.monotonic() < until:
+              hashlib.sha256(b'pc1-ci' * 1024).digest()
+          PY
+          date -u +%s
